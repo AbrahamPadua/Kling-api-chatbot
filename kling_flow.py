@@ -205,11 +205,13 @@ async def run_kling_multi_image_flow(
         ).send()
         uploaded_files.extend(list(new_files or []))
 
-    text_input = await ask_text(
-        "Paste 1–4 image URLs or Base64 strings (optional if uploading files).",
-        "",
-        600,
-    )
+    text_input = ""
+    if not uploaded_files:
+        text_input = await ask_text(
+            "Paste 1–4 image URLs or Base64 strings (optional if uploading files).",
+            "",
+            600,
+        )
     image_items: List[str] = []
     image_items.extend(parse_image_inputs(initial_text))
     image_items.extend(parse_image_inputs(text_input))
