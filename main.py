@@ -43,7 +43,13 @@ try:
 except Exception:
     pass
 
-from providers import call_provider, call_kling_multi_image_to_video, call_kling_image_to_video, ProviderError
+from providers import (
+    call_provider,
+    call_kling_multi_image_to_video,
+    call_kling_image_to_video,
+    get_kling_task_result,
+    ProviderError,
+)
 from json_datalayer import JsonDataLayer
 from kling_flow import run_kling_flow, extract_files_from_response
 from media_index import add_media_entry, render_media_page
@@ -418,6 +424,33 @@ async def _parse_command(message: cl.Message) -> bool:
             except ValueError:
                 page = 1
         await cl.Message(content=render_media_page(page), author="system").send()
+        return True
+    if lowered.startswith("/kling_task"):
+        parts = text.split(maxsplit=1)
+        task_id = parts[1].strip() if len(parts) == 2 else ""
+        if not task_id:
+            task_id = await _ask_text("Enter the Kling task_id:", "", 600)
+        if not task_id:
+            await cl.Message(content="Kling task_id is required.", author="system").send()
+            return True
+        status_msg = await cl.Message(content="Checking Kling task status...", author="system").send()
+        try:
+            result = await asyncio.to_thread(get_kling_task_result, task_id)
+            status = result.get("status")
+            video_url = result.get("video_url")
+            if video_url:
+                thread_id = await _ensure_thread_id()
+                add_media_entry(video_url, "video", thread_id, "Kling")
+                reply = f"Kling task {task_id} ready: {video_url}"
+            else:
+                reply = f"Kling task {task_id} status: {status or 'unknown'}"
+            if status_msg:
+                status_msg.content = reply
+                await status_msg.update()
+        except ProviderError as exc:
+            if status_msg:
+                status_msg.content = f"Kling task lookup failed: {exc}"
+                await status_msg.update()
         return True
     if lowered.startswith("/provider"):
         parts = text.split(maxsplit=1)

@@ -291,6 +291,47 @@ def call_kling_image_to_video(
         time.sleep(poll_interval_s)
 
 
+def get_kling_task_result(task_id: str) -> Dict[str, Any]:
+    if not task_id:
+        raise ProviderError("Kling task_id is required.")
+    api_key = _get_kling_token()
+    base_url = "https://api-singapore.klingai.com"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    endpoints = [
+        f"{base_url}/v1/videos/image2video/{task_id}",
+        f"{base_url}/v1/videos/multi-image2video/{task_id}",
+    ]
+    last_error: Optional[str] = None
+    for url in endpoints:
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            if resp.status_code == 404:
+                last_error = f"Task not found at {url}"
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") != 0:
+                last_error = f"Kling task error: {data}"
+                continue
+            status = data.get("data", {}).get("task_status")
+            videos = data.get("data", {}).get("task_result", {}).get("videos", [])
+            video_url = None
+            if isinstance(videos, list) and videos:
+                video_url = videos[0].get("url")
+            return {
+                "status": status,
+                "video_url": video_url,
+                "raw": data,
+            }
+        except requests.RequestException as exc:
+            last_error = f"Kling task request failed: {exc}"
+            continue
+    raise ProviderError(last_error or "Kling task lookup failed for the provided task_id.")
+
+
 def _call_anthropic(
     model: str,
     messages: List[Dict[str, str]],
