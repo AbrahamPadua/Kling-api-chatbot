@@ -1,0 +1,7 @@
+chainlit
+requests
+python-dotenv
+openai
+anthropic
+google-generativeai
+PyJWT
