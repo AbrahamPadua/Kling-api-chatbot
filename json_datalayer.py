@@ -258,7 +258,9 @@ class JsonDataLayer:
                 self._migrate_thread_user_ids(target_user)
                 self._migrated_user_ids = True
         data = self._load_data()
-        threads = list(data.values())
+        threads = [
+            t for k, t in data.items() if isinstance(t, dict) and not str(k).startswith("_")
+        ]
         if isinstance(filters, ThreadFilter):
             user_id = getattr(filters, "userId", None)
             if user_id:

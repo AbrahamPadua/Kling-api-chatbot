@@ -2,7 +2,7 @@ import asyncio
 import os
 import uuid
 from datetime import datetime
-from typing import Dict, List, TypedDict, Optional
+from typing import Dict, List, TypedDict, Optional, Any
 
 import chainlit as cl
 from chainlit.input_widget import Select, Slider
@@ -189,6 +189,51 @@ def _restore_session_from_metadata(metadata: Optional[Dict[str, object]]) -> boo
         restored = True
 
     return restored
+
+
+def _rebuild_histories_from_thread(thread: Optional[Dict[str, object]]) -> bool:
+    if not isinstance(thread, dict):
+        return False
+    metadata = thread.get("metadata")
+    provider_id = None
+    if isinstance(metadata, dict):
+        provider_id = metadata.get("provider_id")
+    if not isinstance(provider_id, str) or not provider_id:
+        provider_id = cl.user_session.get("provider_id")
+    if not isinstance(provider_id, str) or not provider_id:
+        return False
+
+    steps = thread.get("steps")
+    if not isinstance(steps, list):
+        return False
+
+    ordered_steps: List[Dict[str, Any]] = [s for s in steps if isinstance(s, dict)]
+    ordered_steps.sort(key=lambda s: str(s.get("createdAt") or ""))
+
+    def _build_from_types(type_map: Dict[str, str]) -> List[Dict[str, str]]:
+        conv: List[Dict[str, str]] = []
+        for step in ordered_steps:
+            step_type = step.get("type")
+            role = type_map.get(step_type) if isinstance(step_type, str) else None
+            if not role:
+                continue
+            output = step.get("output")
+            if isinstance(output, str) and output.strip():
+                conv.append({"role": role, "content": output.strip()})
+        return conv
+
+    conversation = _build_from_types({"user": "user", "assistant": "assistant"})
+    if not conversation:
+        conversation = _build_from_types({"user_message": "user", "assistant_message": "assistant"})
+    if not conversation:
+        return False
+
+    histories = cl.user_session.get("histories") or {}
+    if not isinstance(histories, dict):
+        histories = {}
+    histories[provider_id] = conversation
+    cl.user_session.set("histories", histories)
+    return True
 
 
 def _thread_title_set(thread: Optional[Dict[str, object]]) -> bool:
@@ -526,6 +571,7 @@ async def on_start():
             if has_user_step:
                 metadata = thread.get("metadata")
                 _restore_session_from_metadata(metadata)
+                _rebuild_histories_from_thread(thread)
                 return
 
     _reset_session()
@@ -554,7 +600,9 @@ async def on_resume(thread):
 
     if isinstance(thread, dict):
         metadata = thread.get("metadata")
-        if _restore_session_from_metadata(metadata):
+        restored = _restore_session_from_metadata(metadata)
+        rebuilt = _rebuild_histories_from_thread(thread)
+        if restored or rebuilt:
             await _send_chat_settings()
             return
 
