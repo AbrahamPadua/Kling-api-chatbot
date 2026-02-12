@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, List, TypedDict, Optional
 
 import chainlit as cl
+from chainlit.input_widget import Select, Slider
 
 try:
     import chainlit.server as chainlit_server
@@ -349,6 +350,48 @@ def _set_temperature(value: float) -> None:
     cl.user_session.set("temperature", value)
 
 
+async def _send_chat_settings() -> None:
+    provider_name = cl.user_session.get("provider_name")
+    if not isinstance(provider_name, str) or provider_name not in PROVIDERS:
+        provider_name = list(PROVIDERS.keys())[0]
+    models = PROVIDERS[provider_name]["models"]
+    current_model = cl.user_session.get("model")
+    if not isinstance(current_model, str) or current_model not in models:
+        current_model = models[0] if models else ""
+    temperature = cl.user_session.get("temperature")
+    if not isinstance(temperature, (int, float)):
+        temperature = PROVIDERS[provider_name]["default_temp"]
+
+    provider_options = list(PROVIDERS.keys())
+    provider_index = provider_options.index(provider_name) if provider_name in provider_options else 0
+    model_index = models.index(current_model) if current_model in models else 0
+
+    await cl.ChatSettings(
+        [
+            Select(
+                id="Provider",
+                label="Provider",
+                values=provider_options,
+                initial_index=provider_index,
+            ),
+            Select(
+                id="Model",
+                label=f"Model ({provider_name})",
+                values=models,
+                initial_index=model_index,
+            ),
+            Slider(
+                id="Temperature",
+                label="Temperature",
+                initial=float(temperature),
+                min=0,
+                max=2,
+                step=0.1,
+            ),
+        ]
+    ).send()
+
+
 async def _ask_provider() -> None:
     actions = [cl.Action(name="provider", label=name, payload={"provider": name}) for name in PROVIDERS.keys()]
     content = "Pick a provider to begin:\n" + "\n".join(f"- {name}" for name in PROVIDERS.keys())
@@ -486,6 +529,7 @@ async def on_start():
                 return
 
     _reset_session()
+    await _send_chat_settings()
     await cl.Message(
         content=(
             "Welcome! This chat now runs in Chainlit.\n"
@@ -511,9 +555,34 @@ async def on_resume(thread):
     if isinstance(thread, dict):
         metadata = thread.get("metadata")
         if _restore_session_from_metadata(metadata):
+            await _send_chat_settings()
             return
 
+    await _send_chat_settings()
     await _ask_provider()
+
+
+@cl.on_settings_update
+async def on_settings_update(settings):
+    provider_name = settings.get("Provider") if isinstance(settings, dict) else None
+    model_name = settings.get("Model") if isinstance(settings, dict) else None
+    temperature = settings.get("Temperature") if isinstance(settings, dict) else None
+
+    if not isinstance(provider_name, str) or provider_name not in PROVIDERS:
+        provider_name = cl.user_session.get("provider_name")
+
+    if isinstance(provider_name, str) and provider_name in PROVIDERS:
+        _set_provider(provider_name)
+        models = PROVIDERS[provider_name]["models"]
+        if not isinstance(model_name, str) or model_name not in models:
+            model_name = _ensure_default_model(provider_name)
+        if isinstance(model_name, str) and model_name in models:
+            _set_model(model_name)
+
+    if isinstance(temperature, (int, float)):
+        _set_temperature(float(temperature))
+
+    await _send_chat_settings()
 
 
 @cl.action_callback("provider")
@@ -528,6 +597,7 @@ async def provider_selected(action: cl.Action):
     try:
         _set_provider(provider_val)
         await cl.Message(content=f"Provider set to {provider_val}.", author="system").send()
+        await _send_chat_settings()
         default_model = _ensure_default_model(provider_val)
         if provider_val == "Kling" and default_model:
             await run_kling_flow(
@@ -566,6 +636,7 @@ async def model_selected(action: cl.Action):
         _set_model(model_val)
         temp = cl.user_session.get("temperature") or 0.7
         await cl.Message(content=f"Model set to {model_val}. Temperature {temp:.2f}. Use /temp X to change.", author="system").send()
+        await _send_chat_settings()
     except ProviderError as exc:
         await cl.Message(content=str(exc), author="system").send()
         provider_name = cl.user_session.get("provider_name")
