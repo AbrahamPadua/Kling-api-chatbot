@@ -1,5 +1,7 @@
 import asyncio
 import os
+import re
+import time
 import uuid
 from datetime import datetime
 from typing import Dict, List, TypedDict, Optional
@@ -46,6 +48,7 @@ except Exception:
 
 from providers import (
     call_provider,
+    list_anthropic_models,
     call_kling_multi_image_to_video,
     call_kling_image_to_video,
     get_kling_task_result,
@@ -56,6 +59,47 @@ from kling_flow import run_kling_flow, extract_files_from_response
 from media_index import add_media_entry, render_media_page
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+DEFAULT_CLAUDE_MODELS = [
+    "claude-opus-4-6",
+    "claude-3-5-sonnet-latest",
+]
+_CLAUDE_MODELS_LAST_SYNC_TS = 0.0
+_CLAUDE_MODELS_SYNC_TTL_S = 900
+_CLAUDE_DISPLAY_TO_MODEL: Dict[str, str] = {}
+_CLAUDE_MODEL_TO_DISPLAY: Dict[str, str] = {}
+
+
+def _build_claude_display_maps(model_ids: List[str]) -> List[str]:
+    global _CLAUDE_DISPLAY_TO_MODEL
+    global _CLAUDE_MODEL_TO_DISPLAY
+    display_to_model: Dict[str, str] = {}
+    model_to_display: Dict[str, str] = {}
+    for model_id in model_ids:
+        if not isinstance(model_id, str):
+            continue
+        # Trim snapshot suffixes like -20251101 for cleaner UI choices.
+        display_name = re.sub(r"-\d{8}$", "", model_id)
+        if display_name not in display_to_model:
+            display_to_model[display_name] = model_id
+        model_to_display[model_id] = display_name
+    _CLAUDE_DISPLAY_TO_MODEL = display_to_model
+    _CLAUDE_MODEL_TO_DISPLAY = model_to_display
+    return list(display_to_model.keys())
+
+
+def _normalize_model_choice(provider_name: str, model_choice: str) -> str:
+    if provider_name != "Claude":
+        return model_choice
+    if model_choice in _CLAUDE_DISPLAY_TO_MODEL:
+        return model_choice
+    mapped = _CLAUDE_MODEL_TO_DISPLAY.get(model_choice)
+    return mapped or model_choice
+
+
+def _resolve_provider_model_id(provider_name: str, model_choice: str) -> str:
+    if provider_name != "Claude":
+        return model_choice
+    return _CLAUDE_DISPLAY_TO_MODEL.get(model_choice, model_choice)
 
 
 class ProviderConfig(TypedDict):
@@ -67,15 +111,7 @@ class ProviderConfig(TypedDict):
 PROVIDERS: Dict[str, ProviderConfig] = {
     "Claude": {
         "id": "claude",
-        "models": [
-            "claude-3.5-sonnet-latest",
-            "claude-3.5-sonnet",
-            "claude-3.5-haiku-latest",
-            "claude-3.5-haiku",
-            "claude-3-opus",
-            "claude-3-sonnet",
-            "claude-3-haiku",
-        ],
+        "models": DEFAULT_CLAUDE_MODELS.copy(),
         "default_temp": 0.6,
     },
     "GPT": {
@@ -124,6 +160,9 @@ PROVIDERS: Dict[str, ProviderConfig] = {
         "default_temp": 0.0,
     },
 }
+
+# Initialize friendly Claude model labels from defaults before first API sync.
+PROVIDERS["Claude"]["models"] = _build_claude_display_maps(DEFAULT_CLAUDE_MODELS)
 
 
 DATA_LAYER = JsonDataLayer()
@@ -333,10 +372,30 @@ def _set_model(model: str) -> None:
     provider_name = cl.user_session.get("provider_name")
     if not provider_name:
         raise ProviderError("Pick a provider before choosing a model.")
+    model = _normalize_model_choice(provider_name, model)
     models = PROVIDERS[provider_name]["models"]
     if model not in models:
         raise ProviderError(f"Unknown model for {provider_name}: {model}")
     cl.user_session.set("model", model)
+
+
+def _coerce_valid_model(provider_name: str) -> Optional[str]:
+    models = PROVIDERS[provider_name]["models"]
+    if not models:
+        cl.user_session.set("model", None)
+        return None
+    current_model = cl.user_session.get("model")
+    if provider_name == "Claude" and isinstance(current_model, str):
+        normalized = _normalize_model_choice(provider_name, current_model)
+        if normalized != current_model:
+            cl.user_session.set("model", normalized)
+            current_model = normalized
+    if isinstance(current_model, str) and current_model in models:
+        return current_model
+    fallback = models[0]
+    cl.user_session.set("model", fallback)
+    return fallback
+
 
 def _ensure_default_model(provider_name: str) -> Optional[str]:
     models = PROVIDERS[provider_name]["models"]
@@ -350,12 +409,36 @@ def _set_temperature(value: float) -> None:
     cl.user_session.set("temperature", value)
 
 
+async def _sync_claude_models(force: bool = False) -> None:
+    global _CLAUDE_MODELS_LAST_SYNC_TS
+    now = time.time()
+    if not force and (now - _CLAUDE_MODELS_LAST_SYNC_TS) < _CLAUDE_MODELS_SYNC_TTL_S:
+        return
+    try:
+        model_ids = await asyncio.to_thread(list_anthropic_models)
+        if model_ids:
+            PROVIDERS["Claude"]["models"] = _build_claude_display_maps(model_ids)
+            _CLAUDE_MODELS_LAST_SYNC_TS = now
+    except ProviderError as exc:
+        try:
+            print(f"[main] Claude model sync failed, using defaults: {exc}")
+        except Exception:
+            pass
+
+
 async def _send_chat_settings() -> None:
     provider_name = cl.user_session.get("provider_name")
     if not isinstance(provider_name, str) or provider_name not in PROVIDERS:
         provider_name = list(PROVIDERS.keys())[0]
+    if provider_name == "Claude":
+        await _sync_claude_models()
     models = PROVIDERS[provider_name]["models"]
     current_model = cl.user_session.get("model")
+    if provider_name == "Claude" and isinstance(current_model, str):
+        normalized = _normalize_model_choice(provider_name, current_model)
+        if normalized != current_model:
+            current_model = normalized
+            cl.user_session.set("model", normalized)
     if not isinstance(current_model, str) or current_model not in models:
         current_model = models[0] if models else ""
     temperature = cl.user_session.get("temperature")
@@ -399,6 +482,8 @@ async def _ask_provider() -> None:
 
 
 async def _ask_model(provider_name: str) -> None:
+    if provider_name == "Claude":
+        await _sync_claude_models(force=True)
     models = PROVIDERS[provider_name]["models"]
     actions = [cl.Action(name="model", label=m, payload={"model": m}) for m in models]
     content = "Select a model from the options below:\n" + "\n".join(f"- {m}" for m in models)
@@ -572,6 +657,8 @@ async def on_settings_update(settings):
         provider_name = cl.user_session.get("provider_name")
 
     if isinstance(provider_name, str) and provider_name in PROVIDERS:
+        if provider_name == "Claude":
+            await _sync_claude_models(force=True)
         _set_provider(provider_name)
         models = PROVIDERS[provider_name]["models"]
         if not isinstance(model_name, str) or model_name not in models:
@@ -595,6 +682,8 @@ async def provider_selected(action: cl.Action):
         await _ask_provider()
         return
     try:
+        if provider_val == "Claude":
+            await _sync_claude_models(force=True)
         _set_provider(provider_val)
         await cl.Message(content=f"Provider set to {provider_val}.", author="system").send()
         await _send_chat_settings()
@@ -665,6 +754,17 @@ async def on_message(message: cl.Message):
         await cl.Message(content="Please pick a provider first.", author="system").send()
         await _ask_provider()
         return
+    model_before = model if isinstance(model, str) else None
+    model = _coerce_valid_model(provider_name)
+    if isinstance(model_before, str) and model_before != model and isinstance(model, str):
+        await cl.Message(
+            content=(
+                f"Saved model '{model_before}' is unavailable for {provider_name}. "
+                f"Switched to '{model}'."
+            ),
+            author="system",
+        ).send()
+        await _send_chat_settings()
     if not model:
         default_model = _ensure_default_model(provider_name)
         if provider_id == "kling" and default_model:
@@ -732,10 +832,11 @@ async def on_message(message: cl.Message):
 
     status = await cl.Message(content=f"Calling {provider_name} ({model})...", author="system").send()
     try:
+        provider_model_id = _resolve_provider_model_id(provider_name, model)
         reply = await asyncio.to_thread(
             call_provider,
             provider_id,
-            model,
+            provider_model_id,
             history,
             float(temperature),
             system_prompt,

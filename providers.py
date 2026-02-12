@@ -62,6 +62,69 @@ def call_provider(
     raise ProviderError(f"Unsupported provider: {provider}")
 
 
+def list_anthropic_models(limit: int = 100, max_pages: int = 5) -> List[str]:
+    api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")
+    if not api_key:
+        raise ProviderError("Missing API key: set ANTHROPIC_API_KEY (or CLAUDE_API_KEY) in .env")
+    base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    anthropic_version = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": anthropic_version,
+        "content-type": "application/json",
+    }
+
+    model_ids: List[str] = []
+    after_id: Optional[str] = None
+
+    try:
+        for _ in range(max_pages):
+            params: Dict[str, Any] = {"limit": limit}
+            if after_id:
+                params["after_id"] = after_id
+            resp = requests.get(f"{base_url}/v1/models", headers=headers, params=params, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("data", [])
+            if not isinstance(items, list):
+                break
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                model_id = item.get("id")
+                if isinstance(model_id, str) and model_id.startswith("claude"):
+                    model_ids.append(model_id)
+
+            if not data.get("has_more"):
+                break
+            last_id = data.get("last_id")
+            if not isinstance(last_id, str) or not last_id:
+                break
+            after_id = last_id
+    except requests.HTTPError as exc:
+        detail = ""
+        request_id = None
+        status_code = None
+        try:
+            status_code = resp.status_code
+            detail = resp.text
+            request_id = resp.headers.get("request-id")
+        except Exception:
+            pass
+        request_id_part = f" request-id={request_id}" if request_id else ""
+        raise ProviderError(
+            f"Anthropic model list error {status_code}: {detail or exc}.{request_id_part}"
+        ) from exc
+    except requests.RequestException as exc:
+        raise ProviderError(f"Anthropic model list network error: {exc}") from exc
+
+    # de-duplicate while preserving order
+    deduped = list(dict.fromkeys(model_ids))
+    if not deduped:
+        raise ProviderError("Anthropic model list returned no Claude models.")
+    return deduped
+
+
 def call_kling_omni_video(
     prompt: str,
     image_list: Optional[List[Dict[str, str]]] = None,
@@ -339,11 +402,15 @@ def _call_anthropic(
     system_prompt: str,
     max_tokens: int,
 ) -> str:
-    api_key = _get_key("ANTHROPIC_API_KEY")
-    url = "https://api.anthropic.com/v1/messages"
+    api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")
+    if not api_key:
+        raise ProviderError("Missing API key: set ANTHROPIC_API_KEY (or CLAUDE_API_KEY) in .env")
+    base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    url = f"{base_url}/v1/messages"
+    anthropic_version = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
     headers = {
         "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
+        "anthropic-version": anthropic_version,
         "content-type": "application/json",
     }
     payload = {
@@ -367,8 +434,32 @@ def _call_anthropic(
             texts = [c.get("text", "") for c in content if isinstance(c, dict)]
             return "\n".join(t for t in texts if t)
         return str(data)
+    except requests.HTTPError as exc:
+        detail = ""
+        request_id = None
+        status_code = None
+        try:
+            status_code = resp.status_code
+            detail = resp.text
+            request_id = resp.headers.get("request-id")
+        except Exception:
+            pass
+        if status_code == 404 and "not_found_error" in detail and "model:" in detail:
+            fallback_model = os.getenv("ANTHROPIC_FALLBACK_MODEL", "claude-opus-4-6")
+            if fallback_model and fallback_model != model:
+                return _call_anthropic(
+                    fallback_model,
+                    messages,
+                    temperature,
+                    system_prompt,
+                    max_tokens,
+                )
+        request_id_part = f" request-id={request_id}" if request_id else ""
+        raise ProviderError(
+            f"Anthropic error {status_code}: {detail or exc}.{request_id_part}"
+        ) from exc
     except requests.RequestException as exc:
-        raise ProviderError(f"Anthropic error: {exc}") from exc
+        raise ProviderError(f"Anthropic network error: {exc}") from exc
 
 
 def _call_openai(
