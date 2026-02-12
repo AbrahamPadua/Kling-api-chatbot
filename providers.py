@@ -46,14 +46,40 @@ def call_provider(
     temperature: float = 0.7,
     system_prompt: str = "",
     max_tokens: int = 1024,
+    top_p: Optional[float] = None,
+    thinking: Optional[Dict[str, Any]] = None,
 ) -> str:
     provider = provider.lower()
     if provider == "claude":
-        return _call_anthropic(model, messages, temperature, system_prompt, max_tokens)
+        return _call_anthropic(
+            model,
+            messages,
+            temperature,
+            system_prompt,
+            max_tokens,
+            top_p=top_p,
+            thinking=thinking,
+        )
     if provider == "gpt":
-        return _call_openai(model, messages, temperature, system_prompt, max_tokens)
+        return _call_openai(
+            model,
+            messages,
+            temperature,
+            system_prompt,
+            max_tokens,
+            top_p=top_p,
+            thinking=thinking,
+        )
     if provider == "gemini":
-        return _call_gemini(model, messages, temperature, system_prompt, max_tokens)
+        return _call_gemini(
+            model,
+            messages,
+            temperature,
+            system_prompt,
+            max_tokens,
+            top_p=top_p,
+            thinking=thinking,
+        )
     if provider == "kling":
         raise ProviderError(
             "Kling OmniVideo requires structured inputs (images/videos). "
@@ -401,6 +427,8 @@ def _call_anthropic(
     temperature: float,
     system_prompt: str,
     max_tokens: int,
+    top_p: Optional[float] = None,
+    thinking: Optional[Dict[str, Any]] = None,
 ) -> str:
     api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")
     if not api_key:
@@ -413,15 +441,54 @@ def _call_anthropic(
         "anthropic-version": anthropic_version,
         "content-type": "application/json",
     }
+    effective_max_tokens = int(max_tokens)
+    effective_thinking = thinking if isinstance(thinking, dict) else None
+
+    adaptive_thinking = False
+    effort_value: Optional[str] = None
+    manual_budget: Optional[int] = None
+    if isinstance(effective_thinking, dict) and bool(effective_thinking.get("enabled")):
+        mode = str(effective_thinking.get("mode") or effective_thinking.get("type") or "enabled").strip().lower()
+        if mode == "adaptive":
+            adaptive_thinking = True
+            effort = effective_thinking.get("effort")
+            if isinstance(effort, str):
+                effort_normalized = effort.strip().lower()
+                if effort_normalized in {"low", "medium", "high", "max"}:
+                    effort_value = effort_normalized
+        else:
+            budget = effective_thinking.get("budget_tokens")
+            if isinstance(budget, (int, float)):
+                manual_budget = int(budget)
+            else:
+                manual_budget = 1024
+
+    if isinstance(manual_budget, int) and effective_max_tokens <= manual_budget:
+        effective_max_tokens = manual_budget + 256
+
     payload = {
         "model": model,
         "messages": [
             {"role": msg.get("role", "user"), "content": msg.get("content", "")}
             for msg in messages
         ],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
+        "max_tokens": effective_max_tokens,
     }
+    if adaptive_thinking:
+        payload["thinking"] = {"type": "adaptive"}
+        if effort_value:
+            payload["output_config"] = {"effort": effort_value}
+        payload["temperature"] = 1
+    elif isinstance(manual_budget, int):
+        payload["thinking"] = {"type": "enabled", "budget_tokens": manual_budget}
+        payload["temperature"] = 1
+    else:
+        # Some Anthropic models reject requests when both temperature and top_p are set.
+        # Prefer explicit top_p when provided, otherwise send temperature.
+        if isinstance(top_p, (int, float)):
+            payload["top_p"] = float(top_p)
+        else:
+            payload["temperature"] = temperature
     if system_prompt:
         payload["system"] = system_prompt
     try:
@@ -453,6 +520,8 @@ def _call_anthropic(
                     temperature,
                     system_prompt,
                     max_tokens,
+                    top_p=top_p,
+                    thinking=thinking,
                 )
         request_id_part = f" request-id={request_id}" if request_id else ""
         raise ProviderError(
@@ -468,6 +537,8 @@ def _call_openai(
     temperature: float,
     system_prompt: str,
     max_tokens: int,
+    top_p: Optional[float] = None,
+    thinking: Optional[Dict[str, Any]] = None,
 ) -> str:
     api_key = _get_key("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -490,10 +561,62 @@ def _call_openai(
         # Newer GPT models prefer max_completion_tokens; avoid max_tokens to prevent 400s
         "max_completion_tokens": max_tokens,
     }
+    if isinstance(top_p, (int, float)):
+        payload["top_p"] = float(top_p)
+    enable_reasoning = False
+    effort = "medium"
+    if isinstance(thinking, dict) and thinking.get("enabled"):
+        effort = str(thinking.get("effort") or "medium").strip().lower()
+        if effort not in {"low", "medium", "high"}:
+            effort = "medium"
+        payload["reasoning_effort"] = effort
+        enable_reasoning = True
+
+    def _send(json_payload: Dict[str, Any]) -> Dict[str, Any]:
+        response = requests.post(url, headers=headers, json=json_payload, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+        data = _send(payload)
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.response.text if exc.response is not None else ""
+        except Exception:
+            detail = ""
+
+        lowered = detail.lower()
+        if enable_reasoning and exc.response is not None and exc.response.status_code == 400:
+            # Compatibility fallback for endpoints that don't support reasoning_effort.
+            if "reasoning_effort" in lowered and "unrecognized" in lowered:
+                payload.pop("reasoning_effort", None)
+                payload["reasoning"] = {"effort": effort}
+                try:
+                    data = _send(payload)
+                except requests.HTTPError as exc2:
+                    detail2 = ""
+                    try:
+                        detail2 = exc2.response.text if exc2.response is not None else ""
+                    except Exception:
+                        detail2 = ""
+                    lowered2 = detail2.lower()
+                    # Final fallback: keep the request working even if reasoning is unsupported.
+                    if exc2.response is not None and exc2.response.status_code == 400 and "reasoning" in lowered2 and "unrecognized" in lowered2:
+                        payload.pop("reasoning", None)
+                        data = _send(payload)
+                    else:
+                        raise ProviderError(f"OpenAI error {exc2.response.status_code}: {detail2 or exc2}") from exc2
+            elif "reasoning" in lowered and "unrecognized" in lowered:
+                payload.pop("reasoning_effort", None)
+                payload.pop("reasoning", None)
+                data = _send(payload)
+            else:
+                raise ProviderError(f"OpenAI error {exc.response.status_code}: {detail or exc}") from exc
+        else:
+            raise ProviderError(f"OpenAI error {exc.response.status_code if exc.response is not None else ''}: {detail or exc}") from exc
+
+    try:
         choice = data.get("choices", [{}])[0] if isinstance(data.get("choices"), list) else {}
         message = choice.get("message", {}) if isinstance(choice, dict) else {}
         content = message.get("content")
@@ -514,25 +637,10 @@ def _call_openai(
             raise ProviderError(f"OpenAI error payload: {data['error']}")
 
         text_body = None
-        try:
-            text_body = resp.text
-        except Exception:
-            text_body = None
         raise ProviderError(
             "OpenAI returned no content. Full response: "
             f"{data or text_body or '(empty response)'}"
         )
-    except requests.HTTPError as exc:
-        detail = ""
-        try:
-            detail = resp.text
-        except Exception:
-            detail = ""
-        if resp.status_code == 404:
-            raise ProviderError(
-                f"OpenAI 404: check model name '{model}' or base URL ({url}). Response: {detail}"
-            ) from exc
-        raise ProviderError(f"OpenAI error {resp.status_code}: {detail or exc}") from exc
     except requests.RequestException as exc:
         raise ProviderError(f"OpenAI network error: {exc}") from exc
 
@@ -543,6 +651,8 @@ def _call_gemini(
     temperature: float,
     system_prompt: str,
     max_tokens: int,
+    top_p: Optional[float] = None,
+    thinking: Optional[Dict[str, Any]] = None,
 ) -> str:
     api_key = _get_key("GEMINI_API_KEY")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -556,12 +666,20 @@ def _call_gemini(
         role = "user" if role == "user" else "model"
         contents.append({"role": role, "parts": [to_part(msg)]})
 
+    generation_config: Dict[str, object] = {
+        "temperature": temperature,
+        "maxOutputTokens": max_tokens,
+    }
+    if isinstance(top_p, (int, float)):
+        generation_config["topP"] = float(top_p)
+    if isinstance(thinking, dict) and thinking.get("enabled"):
+        budget = thinking.get("budget_tokens")
+        if isinstance(budget, (int, float)):
+            generation_config["thinkingConfig"] = {"thinkingBudget": int(budget)}
+
     payload: Dict[str, object] = {
         "contents": contents,
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_tokens,
-        },
+        "generationConfig": generation_config,
     }
     if system_prompt:
         payload["system_instruction"] = {"parts": [{"text": system_prompt}]}

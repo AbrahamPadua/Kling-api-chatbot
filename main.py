@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 from datetime import datetime
-from typing import Dict, List, TypedDict, Optional
+from typing import Dict, List, TypedDict, Optional, Any
 
 import chainlit as cl
 from chainlit.input_widget import Select, Slider
@@ -108,6 +108,65 @@ class ProviderConfig(TypedDict):
     default_temp: float
 
 
+def _is_reasoning_gpt_model(model: Optional[str]) -> bool:
+    if not isinstance(model, str):
+        return False
+    lowered = model.lower()
+    return lowered.startswith("o1") or lowered.startswith("o3")
+
+
+def _is_claude_opus_46_model(model: Optional[str]) -> bool:
+    if not isinstance(model, str):
+        return False
+    return model.startswith("claude-opus-4-6")
+
+
+def _model_param_profile(provider_name: str, model: Optional[str]) -> Dict[str, Any]:
+    profile: Dict[str, Any] = {
+        "temperature": True,
+        "top_p": False,
+        "max_tokens": True,
+        "thinking": False,
+        "thinking_effort": False,
+        "thinking_adaptive": False,
+        "temp_default": float(PROVIDERS.get(provider_name, {}).get("default_temp", 0.7)),
+        "max_tokens_default": 2048,
+        "thinking_budget_default": 1024,
+        "thinking_effort_default": "medium",
+    }
+
+    if provider_name == "Claude":
+        resolved_model = _resolve_provider_model_id(provider_name, model) if isinstance(model, str) else None
+        adaptive = _is_claude_opus_46_model(resolved_model)
+        profile["temperature"] = True
+        profile["top_p"] = True
+        profile["max_tokens"] = True
+        profile["thinking"] = True
+        profile["thinking_adaptive"] = adaptive
+        profile["thinking_effort"] = adaptive
+        profile["thinking_effort_default"] = "high"
+        profile["max_tokens_default"] = 2048
+    elif provider_name == "GPT":
+        profile["temperature"] = not _is_reasoning_gpt_model(model)
+        profile["top_p"] = not _is_reasoning_gpt_model(model)
+        profile["max_tokens"] = True
+        profile["thinking"] = True
+        profile["thinking_effort"] = True
+        profile["max_tokens_default"] = 2048
+    elif provider_name == "Gemini":
+        profile["temperature"] = True
+        profile["top_p"] = True
+        profile["max_tokens"] = True
+        profile["thinking"] = True
+        profile["max_tokens_default"] = 2048
+    elif provider_name == "Kling":
+        profile["temperature"] = False
+        profile["top_p"] = False
+        profile["max_tokens"] = False
+
+    return profile
+
+
 PROVIDERS: Dict[str, ProviderConfig] = {
     "Claude": {
         "id": "claude",
@@ -193,6 +252,11 @@ def _reset_session() -> None:
     cl.user_session.set("provider_id", None)
     cl.user_session.set("model", None)
     cl.user_session.set("temperature", None)
+    cl.user_session.set("top_p", None)
+    cl.user_session.set("max_tokens", None)
+    cl.user_session.set("thinking_enabled", False)
+    cl.user_session.set("thinking_budget_tokens", None)
+    cl.user_session.set("thinking_effort", None)
     cl.user_session.set("system_prompt", DEFAULT_SYSTEM_PROMPT)
     cl.user_session.set("histories", {})  # per-provider histories
 
@@ -204,6 +268,11 @@ def _restore_session_from_metadata(metadata: Optional[Dict[str, object]]) -> boo
     provider_id = metadata.get("provider_id")
     model = metadata.get("model")
     temperature = metadata.get("temperature")
+    top_p = metadata.get("top_p")
+    max_tokens = metadata.get("max_tokens")
+    thinking_enabled = metadata.get("thinking_enabled")
+    thinking_budget_tokens = metadata.get("thinking_budget_tokens")
+    thinking_effort = metadata.get("thinking_effort")
     system_prompt = metadata.get("system_prompt")
     histories = metadata.get("histories")
     restored = False
@@ -219,6 +288,21 @@ def _restore_session_from_metadata(metadata: Optional[Dict[str, object]]) -> boo
         restored = True
     if isinstance(temperature, (int, float)):
         cl.user_session.set("temperature", float(temperature))
+        restored = True
+    if isinstance(top_p, (int, float)):
+        cl.user_session.set("top_p", float(top_p))
+        restored = True
+    if isinstance(max_tokens, (int, float)):
+        cl.user_session.set("max_tokens", int(max_tokens))
+        restored = True
+    if isinstance(thinking_enabled, bool):
+        cl.user_session.set("thinking_enabled", thinking_enabled)
+        restored = True
+    if isinstance(thinking_budget_tokens, (int, float)):
+        cl.user_session.set("thinking_budget_tokens", int(thinking_budget_tokens))
+        restored = True
+    if isinstance(thinking_effort, str):
+        cl.user_session.set("thinking_effort", thinking_effort)
         restored = True
     if isinstance(system_prompt, str):
         cl.user_session.set("system_prompt", system_prompt)
@@ -364,7 +448,13 @@ def _set_provider(provider_name: str) -> None:
     cfg = PROVIDERS[provider_name]
     cl.user_session.set("provider_name", provider_name)
     cl.user_session.set("provider_id", cfg["id"])
-    cl.user_session.set("temperature", cfg["default_temp"])
+    profile = _model_param_profile(provider_name, None)
+    cl.user_session.set("temperature", profile["temp_default"])
+    cl.user_session.set("top_p", 1.0)
+    cl.user_session.set("max_tokens", profile["max_tokens_default"])
+    cl.user_session.set("thinking_enabled", None)
+    cl.user_session.set("thinking_budget_tokens", int(profile["thinking_budget_default"]))
+    cl.user_session.set("thinking_effort", str(profile["thinking_effort_default"]))
     cl.user_session.set("model", None)
 
 
@@ -377,6 +467,42 @@ def _set_model(model: str) -> None:
     if model not in models:
         raise ProviderError(f"Unknown model for {provider_name}: {model}")
     cl.user_session.set("model", model)
+    profile = _model_param_profile(provider_name, model)
+    if profile.get("temperature"):
+        temperature = cl.user_session.get("temperature")
+        if not isinstance(temperature, (int, float)):
+            cl.user_session.set("temperature", profile["temp_default"])
+    else:
+        cl.user_session.set("temperature", None)
+    if profile.get("top_p"):
+        top_p = cl.user_session.get("top_p")
+        if not isinstance(top_p, (int, float)):
+            cl.user_session.set("top_p", 1.0)
+    else:
+        cl.user_session.set("top_p", None)
+    if profile.get("max_tokens"):
+        max_tokens = cl.user_session.get("max_tokens")
+        if not isinstance(max_tokens, (int, float)):
+            cl.user_session.set("max_tokens", profile["max_tokens_default"])
+    else:
+        cl.user_session.set("max_tokens", None)
+    if profile.get("thinking"):
+        budget = cl.user_session.get("thinking_budget_tokens")
+        if not isinstance(budget, (int, float)):
+            cl.user_session.set("thinking_budget_tokens", int(profile["thinking_budget_default"]))
+        enabled = cl.user_session.get("thinking_enabled")
+        if not isinstance(enabled, bool):
+            cl.user_session.set("thinking_enabled", bool(profile.get("thinking_adaptive")))
+        if profile.get("thinking_effort"):
+            effort = cl.user_session.get("thinking_effort")
+            if not isinstance(effort, str) or effort not in {"low", "medium", "high"}:
+                cl.user_session.set("thinking_effort", str(profile["thinking_effort_default"]))
+        else:
+            cl.user_session.set("thinking_effort", None)
+    else:
+        cl.user_session.set("thinking_enabled", False)
+        cl.user_session.set("thinking_budget_tokens", None)
+        cl.user_session.set("thinking_effort", None)
 
 
 def _coerce_valid_model(provider_name: str) -> Optional[str]:
@@ -407,6 +533,28 @@ def _ensure_default_model(provider_name: str) -> Optional[str]:
 
 def _set_temperature(value: float) -> None:
     cl.user_session.set("temperature", value)
+
+
+def _set_top_p(value: float) -> None:
+    cl.user_session.set("top_p", value)
+
+
+def _set_max_tokens(value: int) -> None:
+    cl.user_session.set("max_tokens", int(value))
+
+
+def _set_thinking_enabled(value: bool) -> None:
+    cl.user_session.set("thinking_enabled", bool(value))
+
+
+def _set_thinking_budget_tokens(value: int) -> None:
+    cl.user_session.set("thinking_budget_tokens", int(value))
+
+
+def _set_thinking_effort(value: str) -> None:
+    normalized = value.strip().lower()
+    if normalized in {"low", "medium", "high"}:
+        cl.user_session.set("thinking_effort", normalized)
 
 
 async def _sync_claude_models(force: bool = False) -> None:
@@ -441,28 +589,53 @@ async def _send_chat_settings() -> None:
             cl.user_session.set("model", normalized)
     if not isinstance(current_model, str) or current_model not in models:
         current_model = models[0] if models else ""
+    profile = _model_param_profile(provider_name, current_model)
+
     temperature = cl.user_session.get("temperature")
     if not isinstance(temperature, (int, float)):
-        temperature = PROVIDERS[provider_name]["default_temp"]
+        temperature = float(profile["temp_default"])
+
+    top_p = cl.user_session.get("top_p")
+    if not isinstance(top_p, (int, float)):
+        top_p = 1.0
+
+    max_tokens = cl.user_session.get("max_tokens")
+    if not isinstance(max_tokens, (int, float)):
+        max_tokens = int(profile["max_tokens_default"])
+
+    thinking_enabled = cl.user_session.get("thinking_enabled")
+    if not isinstance(thinking_enabled, bool):
+        thinking_enabled = bool(profile.get("thinking_adaptive"))
+
+    thinking_budget_tokens = cl.user_session.get("thinking_budget_tokens")
+    if not isinstance(thinking_budget_tokens, (int, float)):
+        thinking_budget_tokens = int(profile["thinking_budget_default"])
+
+    thinking_effort = cl.user_session.get("thinking_effort")
+    if not isinstance(thinking_effort, str) or thinking_effort not in {"low", "medium", "high"}:
+        thinking_effort = str(profile["thinking_effort_default"])
 
     provider_options = list(PROVIDERS.keys())
     provider_index = provider_options.index(provider_name) if provider_name in provider_options else 0
     model_index = models.index(current_model) if current_model in models else 0
 
-    await cl.ChatSettings(
-        [
-            Select(
-                id="Provider",
-                label="Provider",
-                values=provider_options,
-                initial_index=provider_index,
-            ),
-            Select(
-                id="Model",
-                label=f"Model ({provider_name})",
-                values=models,
-                initial_index=model_index,
-            ),
+    widgets: List[Any] = [
+        Select(
+            id="Provider",
+            label="Provider",
+            values=provider_options,
+            initial_index=provider_index,
+        ),
+        Select(
+            id="Model",
+            label=f"Model ({provider_name})",
+            values=models,
+            initial_index=model_index,
+        ),
+    ]
+
+    if profile.get("temperature"):
+        widgets.append(
             Slider(
                 id="Temperature",
                 label="Temperature",
@@ -470,9 +643,66 @@ async def _send_chat_settings() -> None:
                 min=0,
                 max=2,
                 step=0.1,
-            ),
-        ]
-    ).send()
+            )
+        )
+
+    if profile.get("top_p"):
+        widgets.append(
+            Slider(
+                id="TopP",
+                label="Top P",
+                initial=float(top_p),
+                min=0,
+                max=1,
+                step=0.05,
+            )
+        )
+
+    if profile.get("max_tokens"):
+        widgets.append(
+            Slider(
+                id="MaxTokens",
+                label="Max Tokens",
+                initial=float(int(max_tokens)),
+                min=128,
+                max=8192,
+                step=128,
+            )
+        )
+
+    if profile.get("thinking"):
+        widgets.append(
+            Select(
+                id="Thinking",
+                label="Thinking",
+                values=["Off", "On"],
+                initial_index=1 if thinking_enabled else 0,
+            )
+        )
+        if not profile.get("thinking_adaptive"):
+            widgets.append(
+                Slider(
+                    id="ThinkingBudgetTokens",
+                    label="Thinking Budget Tokens",
+                    initial=float(int(thinking_budget_tokens)),
+                    min=256,
+                    max=8192,
+                    step=256,
+                )
+            )
+    if profile.get("thinking_effort"):
+        effort_values = ["low", "medium", "high"]
+        effort_index = effort_values.index(thinking_effort) if thinking_effort in effort_values else 1
+        widgets.append(
+            Select(
+                id="ThinkingEffort",
+                label="Thinking Effort" + (" (Adaptive)" if profile.get("thinking_adaptive") else ""),
+                values=effort_values,
+                initial_index=effort_index,
+            )
+        )
+
+    await cl.ChatSettings(widgets).send()
 
 
 async def _ask_provider() -> None:
@@ -652,6 +882,11 @@ async def on_settings_update(settings):
     provider_name = settings.get("Provider") if isinstance(settings, dict) else None
     model_name = settings.get("Model") if isinstance(settings, dict) else None
     temperature = settings.get("Temperature") if isinstance(settings, dict) else None
+    top_p = settings.get("TopP") if isinstance(settings, dict) else None
+    max_tokens = settings.get("MaxTokens") if isinstance(settings, dict) else None
+    thinking = settings.get("Thinking") if isinstance(settings, dict) else None
+    thinking_budget_tokens = settings.get("ThinkingBudgetTokens") if isinstance(settings, dict) else None
+    thinking_effort = settings.get("ThinkingEffort") if isinstance(settings, dict) else None
 
     if not isinstance(provider_name, str) or provider_name not in PROVIDERS:
         provider_name = cl.user_session.get("provider_name")
@@ -668,6 +903,16 @@ async def on_settings_update(settings):
 
     if isinstance(temperature, (int, float)):
         _set_temperature(float(temperature))
+    if isinstance(top_p, (int, float)):
+        _set_top_p(float(top_p))
+    if isinstance(max_tokens, (int, float)):
+        _set_max_tokens(int(max_tokens))
+    if isinstance(thinking, str):
+        _set_thinking_enabled(thinking.strip().lower() == "on")
+    if isinstance(thinking_budget_tokens, (int, float)):
+        _set_thinking_budget_tokens(int(thinking_budget_tokens))
+    if isinstance(thinking_effort, str):
+        _set_thinking_effort(thinking_effort)
 
     await _send_chat_settings()
 
@@ -748,6 +993,11 @@ async def on_message(message: cl.Message):
     provider_id = cl.user_session.get("provider_id")
     model = cl.user_session.get("model")
     temperature = cl.user_session.get("temperature") or 0.7
+    top_p = cl.user_session.get("top_p")
+    max_tokens = cl.user_session.get("max_tokens")
+    thinking_enabled = cl.user_session.get("thinking_enabled")
+    thinking_budget_tokens = cl.user_session.get("thinking_budget_tokens")
+    thinking_effort = cl.user_session.get("thinking_effort")
     system_prompt = cl.user_session.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
 
     if not provider_name or not provider_id:
@@ -833,14 +1083,51 @@ async def on_message(message: cl.Message):
     status = await cl.Message(content=f"Calling {provider_name} ({model})...", author="system").send()
     try:
         provider_model_id = _resolve_provider_model_id(provider_name, model)
+        profile = _model_param_profile(provider_name, model)
+        use_temperature = float(temperature) if profile.get("temperature") and isinstance(temperature, (int, float)) else 0.0
+        use_top_p = None
+        if profile.get("top_p") and isinstance(top_p, (int, float)):
+            # Treat 1.0 as default/no-op to avoid conflicting provider params.
+            if abs(float(top_p) - 1.0) > 1e-9:
+                use_top_p = float(top_p)
+        use_max_tokens = int(max_tokens) if profile.get("max_tokens") and isinstance(max_tokens, (int, float)) else int(profile["max_tokens_default"])
+        use_thinking = None
+        if profile.get("thinking") and bool(thinking_enabled):
+            if provider_name == "GPT":
+                effort = (
+                    str(thinking_effort).strip().lower()
+                    if isinstance(thinking_effort, str)
+                    else str(profile["thinking_effort_default"])
+                )
+                if effort not in {"low", "medium", "high"}:
+                    effort = str(profile["thinking_effort_default"])
+                use_thinking = {"enabled": True, "effort": effort}
+            elif provider_name == "Claude" and profile.get("thinking_adaptive"):
+                effort = (
+                    str(thinking_effort).strip().lower()
+                    if isinstance(thinking_effort, str)
+                    else str(profile["thinking_effort_default"])
+                )
+                if effort not in {"low", "medium", "high", "max"}:
+                    effort = str(profile["thinking_effort_default"])
+                use_thinking = {"enabled": True, "mode": "adaptive", "effort": effort}
+            else:
+                budget_tokens = int(thinking_budget_tokens) if isinstance(thinking_budget_tokens, (int, float)) else int(profile["thinking_budget_default"])
+                use_thinking = {"enabled": True, "budget_tokens": budget_tokens}
+            if provider_name == "Claude":
+                # Anthropic thinking mode requires temperature=1 and should avoid top_p.
+                use_temperature = 1.0
+                use_top_p = None
         reply = await asyncio.to_thread(
             call_provider,
             provider_id,
             provider_model_id,
             history,
-            float(temperature),
+            use_temperature,
             system_prompt,
-            2048,
+            use_max_tokens,
+            use_top_p,
+            use_thinking,
         )
         if not reply:
             reply = "(No content received from the provider.)"
