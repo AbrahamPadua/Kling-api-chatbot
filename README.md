@@ -1,6 +1,6 @@
 # Multi-Provider Chatbot (Chainlit)
 
-A Chainlit chat app that lets you talk to Claude, GPT, or Gemini. Pick a provider, choose a model, set temperature, and chat in the browser.
+A Chainlit chat app that lets you talk to Claude, GPT, or Gemini, plus run Kling image/video generation. Pick a provider, choose a model, set temperature, and chat in the browser.
 
 ## Setup
 
@@ -18,6 +18,11 @@ A Chainlit chat app that lets you talk to Claude, GPT, or Gemini. Pick a provide
    KLING_ACCESS_KEY=your_kling_access_key_here
    KLING_SECRET_KEY=your_kling_secret_key_here
    ```
+5. (Optional) Enable sidebar auth:
+   ```env
+   CHAINLIT_AUTH_USERNAME=admin
+   CHAINLIT_AUTH_PASSWORD=your_password
+   ```
 
 ## Run
 
@@ -29,9 +34,9 @@ This starts a browser UI. If you prefer no auto-reload, drop `-w`.
 
 ## Notes
 
-- Chain commands: `/new` resets chat, `/temp 0.7` sets temperature, `/model your-model` picks a model, `/provider Claude|GPT|Gemini` switches providers.
-- Kling Multi-Image → Video: run `/kling` to launch the guided flow for 1–4 images (URL or Base64) plus prompt/negative prompt. The result is returned as a video URL.
+- Chain commands: `/new` resets chat, `/temp 0.7` sets temperature, `/model your-model` picks a model, `/provider Claude|GPT|Gemini|Kling` switches providers, `/media` shows generated media history.
+- Kling Image → Video and Multi‑Image → Video are launched by choosing the Kling provider. The flow guides you through prompts, images (upload, URL, or Base64), and options. Results return a video URL and are indexed in `/media`.
 - Provider/model pickers appear as action buttons; if a model isn't shown, set it with `/model ...`.
-- Histories are kept per provider during the session.
+- Thread titles are generated from the first real prompt (GPT‑5.1) and won’t rename on provider/model selection.
 - Errors from providers are shown inline.
 - To point at Azure/OpenAI-compatible gateways, set `OPENAI_BASE_URL` (defaults to `https://api.openai.com/v1`).

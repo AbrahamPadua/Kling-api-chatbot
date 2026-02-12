@@ -1,14 +1,31 @@
-# Welcome to Chainlit! 🚀🤖
+# Multi‑Provider Chatbot ✨
 
-Hi there, Developer! 👋 We're excited to have you on board. Chainlit is a powerful tool designed to help you prototype, debug and share applications built on top of LLMs.
+Welcome! This app lets you chat with Claude, GPT, or Gemini, and generate videos with Kling.
 
-## Useful Links 🔗
+## Quick start
 
-- **Documentation:** Get started with our comprehensive [Chainlit Documentation](https://docs.chainlit.io) 📚
-- **Discord Community:** Join our friendly [Chainlit Discord](https://discord.gg/k73SQ3FyUh) to ask questions, share your projects, and connect with other developers! 💬
+- Pick a provider from the buttons below.
+- Choose a model (if needed).
+- Ask your question.
 
-We can't wait to see what you create with Chainlit! Happy coding! 💻😊
+## Kling generation
 
-## Welcome screen
+Select **Kling** as your provider to launch guided flows:
 
-To modify the welcome screen, edit the `chainlit.md` file at the root of your project. If you do not want a welcome screen, just leave this file empty.
+- **Image → Video**
+- **Multi‑Image → Video** (1–4 images)
+
+You can upload files, paste URLs, or use Base64.
+
+## Commands
+
+- `/new` reset chat
+- `/temp 0.7` set temperature
+- `/model <name>` select model
+- `/provider <name>` switch provider
+- `/media` view generated media history
+
+## Notes
+
+- Thread titles update only after the first real prompt.
+- Provider/model selections never rename the thread.
