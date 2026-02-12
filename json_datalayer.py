@@ -112,6 +112,17 @@ class JsonDataLayer:
         )
         return trimmed.startswith(transient_prefixes)
 
+    def _ensure_user_identifier(self, thread: Dict[str, Any]) -> None:
+        if not isinstance(thread, dict):
+            return
+        if thread.get("userIdentifier"):
+            return
+        user_identifier = thread.get("userId")
+        if not user_identifier:
+            user_identifier = self._last_identifier or self._last_user_id
+        if user_identifier:
+            thread["userIdentifier"] = user_identifier
+
     def _filter_steps(self, steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         allowed_types = {"user", "assistant", "user_message", "assistant_message"}
         filtered: List[Dict[str, Any]] = []
@@ -132,6 +143,7 @@ class JsonDataLayer:
             if not isinstance(thread, dict):
                 to_delete.append(thread_id)
                 continue
+            self._ensure_user_identifier(thread)
             steps = thread.get("steps") or []
             filtered_steps = self._filter_steps(list(steps))
             if len(filtered_steps) != len(steps):
@@ -211,6 +223,7 @@ class JsonDataLayer:
                 "createdAt": _utc_now_iso(),
                 "name": name or "New Chat",
                 "userId": user_id,
+                "userIdentifier": user_id or self._last_identifier or self._last_user_id,
                 "steps": [],
                 "metadata": metadata or {},
                 "tags": tags or [],
@@ -220,10 +233,12 @@ class JsonDataLayer:
                 thread["name"] = name
             if user_id:
                 thread["userId"] = user_id
+                thread["userIdentifier"] = user_id
             if metadata:
                 thread.setdefault("metadata", {}).update(metadata)
             if tags:
                 thread["tags"] = tags
+            self._ensure_user_identifier(thread)
         data[thread_id] = thread
         self._save_data(data)
 
@@ -267,6 +282,7 @@ class JsonDataLayer:
         thread = data.get(thread_id)
         if not isinstance(thread, dict):
             return None
+        self._ensure_user_identifier(thread)
         steps = thread.get("steps") or []
         filtered_steps = self._filter_steps(list(steps))
         if len(filtered_steps) != len(steps):
@@ -308,6 +324,7 @@ class JsonDataLayer:
                 "createdAt": _utc_now_iso(),
                 "name": "New Chat",
                 "userId": self._last_identifier or self._last_user_id,
+                "userIdentifier": self._last_identifier or self._last_user_id,
                 "steps": [],
                 "metadata": {},
                 "tags": [],

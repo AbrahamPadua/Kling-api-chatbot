@@ -500,6 +500,22 @@ async def on_start():
     await _ask_provider()
 
 
+@cl.on_chat_resume
+async def on_resume(thread):
+    thread_id = None
+    if isinstance(thread, dict):
+        thread_id = thread.get("id")
+    if isinstance(thread_id, str) and thread_id:
+        cl.user_session.set("thread_id", thread_id)
+
+    if isinstance(thread, dict):
+        metadata = thread.get("metadata")
+        if _restore_session_from_metadata(metadata):
+            return
+
+    await _ask_provider()
+
+
 @cl.action_callback("provider")
 async def provider_selected(action: cl.Action):
     provider_val = None
