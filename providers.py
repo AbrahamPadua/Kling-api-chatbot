@@ -43,7 +43,7 @@ def call_provider(
     provider: str,
     model: str,
     messages: List[Dict[str, str]],
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     system_prompt: str = "",
     max_tokens: int = 1024,
     top_p: Optional[float] = None,
@@ -424,7 +424,7 @@ def get_kling_task_result(task_id: str) -> Dict[str, Any]:
 def _call_anthropic(
     model: str,
     messages: List[Dict[str, str]],
-    temperature: float,
+    temperature: Optional[float],
     system_prompt: str,
     max_tokens: int,
     top_p: Optional[float] = None,
@@ -488,7 +488,7 @@ def _call_anthropic(
         if isinstance(top_p, (int, float)):
             payload["top_p"] = float(top_p)
         else:
-            payload["temperature"] = temperature
+            payload["temperature"] = float(temperature) if isinstance(temperature, (int, float)) else 0.7
     if system_prompt:
         payload["system"] = system_prompt
     try:
@@ -534,7 +534,7 @@ def _call_anthropic(
 def _call_openai(
     model: str,
     messages: List[Dict[str, str]],
-    temperature: float,
+    temperature: Optional[float],
     system_prompt: str,
     max_tokens: int,
     top_p: Optional[float] = None,
@@ -557,10 +557,11 @@ def _call_openai(
     payload = {
         "model": model,
         "messages": oai_messages,
-        "temperature": temperature,
         # Newer GPT models prefer max_completion_tokens; avoid max_tokens to prevent 400s
         "max_completion_tokens": max_tokens,
     }
+    if isinstance(temperature, (int, float)):
+        payload["temperature"] = float(temperature)
     if isinstance(top_p, (int, float)):
         payload["top_p"] = float(top_p)
     enable_reasoning = False
@@ -613,6 +614,19 @@ def _call_openai(
                 data = _send(payload)
             else:
                 raise ProviderError(f"OpenAI error {exc.response.status_code}: {detail or exc}") from exc
+        elif exc.response is not None and exc.response.status_code == 400:
+            # Fallback for model-specific parameter constraints.
+            retried = False
+            if "temperature" in lowered and "unsupported" in lowered:
+                payload.pop("temperature", None)
+                retried = True
+            if "top_p" in lowered and "unsupported" in lowered:
+                payload.pop("top_p", None)
+                retried = True
+            if retried:
+                data = _send(payload)
+            else:
+                raise ProviderError(f"OpenAI error {exc.response.status_code}: {detail or exc}") from exc
         else:
             raise ProviderError(f"OpenAI error {exc.response.status_code if exc.response is not None else ''}: {detail or exc}") from exc
 
@@ -648,7 +662,7 @@ def _call_openai(
 def _call_gemini(
     model: str,
     messages: List[Dict[str, str]],
-    temperature: float,
+    temperature: Optional[float],
     system_prompt: str,
     max_tokens: int,
     top_p: Optional[float] = None,
@@ -667,9 +681,10 @@ def _call_gemini(
         contents.append({"role": role, "parts": [to_part(msg)]})
 
     generation_config: Dict[str, object] = {
-        "temperature": temperature,
         "maxOutputTokens": max_tokens,
     }
+    if isinstance(temperature, (int, float)):
+        generation_config["temperature"] = float(temperature)
     if isinstance(top_p, (int, float)):
         generation_config["topP"] = float(top_p)
     if isinstance(thinking, dict) and thinking.get("enabled"):

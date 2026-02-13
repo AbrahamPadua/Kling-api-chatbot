@@ -112,7 +112,19 @@ def _is_reasoning_gpt_model(model: Optional[str]) -> bool:
     if not isinstance(model, str):
         return False
     lowered = model.lower()
-    return lowered.startswith("o1") or lowered.startswith("o3")
+    reasoning_prefixes = (
+        "gpt-5",
+        "o1",
+        "o3",
+        "o4",
+        "codex-mini",
+    )
+    return lowered.startswith(reasoning_prefixes)
+
+
+def _gpt_requires_default_temperature(model: Optional[str]) -> bool:
+    # Reasoning families commonly enforce default sampling behavior.
+    return _is_reasoning_gpt_model(model)
 
 
 def _is_claude_opus_46_model(model: Optional[str]) -> bool:
@@ -147,11 +159,12 @@ def _model_param_profile(provider_name: str, model: Optional[str]) -> Dict[str, 
         profile["thinking_effort_default"] = "high"
         profile["max_tokens_default"] = 2048
     elif provider_name == "GPT":
-        profile["temperature"] = not _is_reasoning_gpt_model(model)
-        profile["top_p"] = not _is_reasoning_gpt_model(model)
+        supports_reasoning = _is_reasoning_gpt_model(model)
+        profile["temperature"] = not _gpt_requires_default_temperature(model)
+        profile["top_p"] = not _gpt_requires_default_temperature(model)
         profile["max_tokens"] = True
-        profile["thinking"] = True
-        profile["thinking_effort"] = True
+        profile["thinking"] = supports_reasoning
+        profile["thinking_effort"] = supports_reasoning
         profile["max_tokens_default"] = 2048
     elif provider_name == "Gemini":
         profile["temperature"] = True
@@ -553,7 +566,7 @@ def _set_thinking_budget_tokens(value: int) -> None:
 
 def _set_thinking_effort(value: str) -> None:
     normalized = value.strip().lower()
-    if normalized in {"low", "medium", "high"}:
+    if normalized in {"low", "medium", "high", "minimal", "max"}:
         cl.user_session.set("thinking_effort", normalized)
 
 
@@ -612,7 +625,7 @@ async def _send_chat_settings() -> None:
         thinking_budget_tokens = int(profile["thinking_budget_default"])
 
     thinking_effort = cl.user_session.get("thinking_effort")
-    if not isinstance(thinking_effort, str) or thinking_effort not in {"low", "medium", "high"}:
+    if not isinstance(thinking_effort, str) or thinking_effort not in {"low", "medium", "high", "minimal", "max"}:
         thinking_effort = str(profile["thinking_effort_default"])
 
     provider_options = list(PROVIDERS.keys())
@@ -691,7 +704,12 @@ async def _send_chat_settings() -> None:
                 )
             )
     if profile.get("thinking_effort"):
-        effort_values = ["low", "medium", "high"]
+        if provider_name == "GPT":
+            effort_values = ["minimal", "low", "medium", "high"]
+        elif provider_name == "Claude" and profile.get("thinking_adaptive"):
+            effort_values = ["low", "medium", "high", "max"]
+        else:
+            effort_values = ["low", "medium", "high"]
         effort_index = effort_values.index(thinking_effort) if thinking_effort in effort_values else 1
         widgets.append(
             Select(
@@ -1084,7 +1102,7 @@ async def on_message(message: cl.Message):
     try:
         provider_model_id = _resolve_provider_model_id(provider_name, model)
         profile = _model_param_profile(provider_name, model)
-        use_temperature = float(temperature) if profile.get("temperature") and isinstance(temperature, (int, float)) else 0.0
+        use_temperature = float(temperature) if profile.get("temperature") and isinstance(temperature, (int, float)) else None
         use_top_p = None
         if profile.get("top_p") and isinstance(top_p, (int, float)):
             # Treat 1.0 as default/no-op to avoid conflicting provider params.
@@ -1099,7 +1117,7 @@ async def on_message(message: cl.Message):
                     if isinstance(thinking_effort, str)
                     else str(profile["thinking_effort_default"])
                 )
-                if effort not in {"low", "medium", "high"}:
+                if effort not in {"minimal", "low", "medium", "high"}:
                     effort = str(profile["thinking_effort_default"])
                 use_thinking = {"enabled": True, "effort": effort}
             elif provider_name == "Claude" and profile.get("thinking_adaptive"):
