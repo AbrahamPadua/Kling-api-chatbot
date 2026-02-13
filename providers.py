@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from typing import List, Dict, Optional, Any
 import requests
@@ -671,14 +672,55 @@ def _call_gemini(
     api_key = _get_key("GEMINI_API_KEY")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
-    def to_part(msg: Dict[str, str]):
-        return {"text": msg.get("content", "")}
+    def _gemini_parts_from_content(content: Any) -> List[Dict[str, Any]]:
+        if isinstance(content, str):
+            return [{"text": content}]
+        if not isinstance(content, list):
+            return [{"text": str(content)}]
+
+        parts: List[Dict[str, Any]] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "text":
+                text_val = item.get("text")
+                if isinstance(text_val, str):
+                    parts.append({"text": text_val})
+                continue
+
+            if item_type == "image_url":
+                image_url = item.get("image_url")
+                if isinstance(image_url, dict):
+                    image_url = image_url.get("url")
+                if not isinstance(image_url, str):
+                    continue
+
+                # Gemini accepts inline_data for images; convert data URLs.
+                m = re.match(r"^data:([^;]+);base64,(.+)$", image_url, re.DOTALL)
+                if m:
+                    mime_type = m.group(1)
+                    data_b64 = m.group(2)
+                    parts.append(
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": data_b64,
+                            }
+                        }
+                    )
+                else:
+                    # Fallback for URL-only references.
+                    parts.append({"text": f"Image URL: {image_url}"})
+                continue
+
+        return parts or [{"text": ""}]
 
     contents = []
     for msg in messages:
         role = msg.get("role", "user")
         role = "user" if role == "user" else "model"
-        contents.append({"role": role, "parts": [to_part(msg)]})
+        contents.append({"role": role, "parts": _gemini_parts_from_content(msg.get("content", ""))})
 
     generation_config: Dict[str, object] = {
         "maxOutputTokens": max_tokens,

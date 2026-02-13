@@ -466,7 +466,7 @@ def _read_text_for_prompt(path: str, max_chars: int = 12000) -> Optional[str]:
     return data
 
 
-def _image_data_url(path: str, max_bytes: int = 5 * 1024 * 1024) -> Optional[str]:
+def _image_base64_payload(path: str, max_bytes: int = 5 * 1024 * 1024) -> Optional[Dict[str, str]]:
     try:
         with open(path, "rb") as f:
             raw = f.read(max_bytes + 1)
@@ -478,7 +478,11 @@ def _image_data_url(path: str, max_bytes: int = 5 * 1024 * 1024) -> Optional[str
     if not mime.startswith("image/"):
         return None
     b64 = base64.b64encode(raw).decode("utf-8")
-    return f"data:{mime};base64,{b64}"
+    return {
+        "mime_type": mime,
+        "base64": b64,
+        "data_url": f"data:{mime};base64,{b64}",
+    }
 
 
 def _build_user_content_with_attachments(provider_id: str, text: str, message: cl.Message):
@@ -487,7 +491,9 @@ def _build_user_content_with_attachments(provider_id: str, text: str, message: c
         return text
 
     text_sections: List[str] = []
-    image_parts: List[Dict[str, Any]] = []
+    gpt_image_parts: List[Dict[str, Any]] = []
+    claude_image_blocks: List[Dict[str, Any]] = []
+    gemini_image_parts: List[Dict[str, Any]] = []
     text_exts = {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".py", ".js", ".ts", ".tsx", ".html", ".css", ".xml"}
 
     for file_obj in files[:4]:
@@ -496,11 +502,35 @@ def _build_user_content_with_attachments(provider_id: str, text: str, message: c
         mime = _file_field(file_obj, "mime", "mime_type", "contentType") or (mimetypes.guess_type(name)[0] or "")
         ext = os.path.splitext(name)[1].lower()
 
-        if provider_id == "gpt" and path:
-            data_url = _image_data_url(path)
-            if data_url:
-                image_parts.append({"type": "image_url", "image_url": {"url": data_url}})
-                continue
+        if path:
+            img_payload = _image_base64_payload(path)
+            if img_payload:
+                if provider_id == "gpt":
+                    gpt_image_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": img_payload["data_url"]},
+                    })
+                    continue
+                if provider_id == "claude":
+                    claude_image_blocks.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img_payload["mime_type"],
+                                "data": img_payload["base64"],
+                            },
+                        }
+                    )
+                    continue
+                if provider_id == "gemini":
+                    gemini_image_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": img_payload["data_url"]},
+                        }
+                    )
+                    continue
 
         is_text_like = bool(mime.startswith("text/")) or ext in text_exts or mime in {"application/json", "application/xml"}
         if is_text_like and path:
@@ -514,8 +544,14 @@ def _build_user_content_with_attachments(provider_id: str, text: str, message: c
     if text_sections:
         text = text + "\n\nAttached file context:\n" + "\n\n".join(text_sections)
 
-    if provider_id == "gpt" and image_parts:
-        return [{"type": "text", "text": text}] + image_parts
+    if provider_id == "gpt" and gpt_image_parts:
+        return [{"type": "text", "text": text}] + gpt_image_parts
+
+    if provider_id == "claude" and claude_image_blocks:
+        return [{"type": "text", "text": text}] + claude_image_blocks
+
+    if provider_id == "gemini" and gemini_image_parts:
+        return [{"type": "text", "text": text}] + gemini_image_parts
 
     return text
 
