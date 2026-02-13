@@ -42,7 +42,7 @@ def _get_kling_token() -> str:
 def call_provider(
     provider: str,
     model: str,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     temperature: Optional[float] = None,
     system_prompt: str = "",
     max_tokens: int = 1024,
@@ -423,7 +423,7 @@ def get_kling_task_result(task_id: str) -> Dict[str, Any]:
 
 def _call_anthropic(
     model: str,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     temperature: Optional[float],
     system_prompt: str,
     max_tokens: int,
@@ -533,7 +533,7 @@ def _call_anthropic(
 
 def _call_openai(
     model: str,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     temperature: Optional[float],
     system_prompt: str,
     max_tokens: int,
@@ -547,7 +547,7 @@ def _call_openai(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    oai_messages: List[Dict[str, str]] = []
+    oai_messages: List[Dict[str, Any]] = []
     if system_prompt:
         oai_messages.append({"role": "system", "content": system_prompt})
     oai_messages.extend(
@@ -661,7 +661,7 @@ def _call_openai(
 
 def _call_gemini(
     model: str,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     temperature: Optional[float],
     system_prompt: str,
     max_tokens: int,

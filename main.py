@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import mimetypes
 import os
 import re
 import time
@@ -438,6 +440,86 @@ async def _ask_text(prompt: str, default: Optional[str] = None, timeout: int = 6
     return text
 
 
+def _file_field(file_obj: object, *keys: str) -> Optional[str]:
+    for key in keys:
+        if isinstance(file_obj, dict):
+            val = file_obj.get(key)
+            if isinstance(val, str) and val:
+                return val
+        if hasattr(file_obj, key):
+            val = getattr(file_obj, key)
+            if isinstance(val, str) and val:
+                return val
+    return None
+
+
+def _read_text_for_prompt(path: str, max_chars: int = 12000) -> Optional[str]:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = f.read(max_chars + 1)
+    except Exception:
+        return None
+    if not data:
+        return None
+    if len(data) > max_chars:
+        return data[:max_chars] + "\n...[truncated]"
+    return data
+
+
+def _image_data_url(path: str, max_bytes: int = 5 * 1024 * 1024) -> Optional[str]:
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(max_bytes + 1)
+    except Exception:
+        return None
+    if not raw or len(raw) > max_bytes:
+        return None
+    mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    if not mime.startswith("image/"):
+        return None
+    b64 = base64.b64encode(raw).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+
+def _build_user_content_with_attachments(provider_id: str, text: str, message: cl.Message):
+    files = extract_files_from_response(message)
+    if not files:
+        return text
+
+    text_sections: List[str] = []
+    image_parts: List[Dict[str, Any]] = []
+    text_exts = {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".py", ".js", ".ts", ".tsx", ".html", ".css", ".xml"}
+
+    for file_obj in files[:4]:
+        name = _file_field(file_obj, "name") or "attachment"
+        path = _file_field(file_obj, "path", "filePath", "filepath", "path_on_disk", "pathOnDisk", "local_path")
+        mime = _file_field(file_obj, "mime", "mime_type", "contentType") or (mimetypes.guess_type(name)[0] or "")
+        ext = os.path.splitext(name)[1].lower()
+
+        if provider_id == "gpt" and path:
+            data_url = _image_data_url(path)
+            if data_url:
+                image_parts.append({"type": "image_url", "image_url": {"url": data_url}})
+                continue
+
+        is_text_like = bool(mime.startswith("text/")) or ext in text_exts or mime in {"application/json", "application/xml"}
+        if is_text_like and path:
+            snippet = _read_text_for_prompt(path)
+            if snippet:
+                text_sections.append(f"[Attachment: {name}]\n{snippet}")
+                continue
+
+        text_sections.append(f"[Attachment: {name}] (binary or unsupported for inline parsing)")
+
+    if text_sections:
+        text = text + "\n\nAttached file context:\n" + "\n\n".join(text_sections)
+
+    if provider_id == "gpt" and image_parts:
+        return [{"type": "text", "text": text}] + image_parts
+
+    return text
+
+
 async def _ensure_thread_id() -> str:
     thread_id = _active_thread_id()
     if thread_id:
@@ -447,7 +529,7 @@ async def _ensure_thread_id() -> str:
     return thread_id
 
 
-def _history_for(provider_id: str) -> List[Dict[str, str]]:
+def _history_for(provider_id: str) -> List[Dict[str, Any]]:
     histories = cl.user_session.get("histories") or {}
     if provider_id not in histories:
         histories[provider_id] = []
@@ -1069,8 +1151,9 @@ async def on_message(message: cl.Message):
         )
         return
 
+    user_content = _build_user_content_with_attachments(provider_id, text, message)
     history = _history_for(provider_id)
-    history.append({"role": "user", "content": text})
+    history.append({"role": "user", "content": user_content})
     thread_id = await _ensure_thread_id()
     thread = await DATA_LAYER.get_thread(thread_id)
     if not _thread_title_set(thread):
