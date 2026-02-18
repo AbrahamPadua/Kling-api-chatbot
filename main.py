@@ -1268,6 +1268,11 @@ async def on_message(message: cl.Message):
         )
         if not reply:
             reply = "(No content received from the provider.)"
+
+        # Log raw reply to terminal so you can inspect the exact text before normalizing.
+        print(f"\n[RAW REPLY from {provider_id}/{provider_model_id}]\n{repr(reply)}\n[END RAW REPLY]\n", flush=True)
+
+        reply = _normalize_latex_for_render(reply)
         history.append({"role": "assistant", "content": reply})
 
         await DATA_LAYER.create_step(
