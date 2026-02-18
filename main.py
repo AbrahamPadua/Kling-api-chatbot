@@ -274,6 +274,7 @@ def _reset_session() -> None:
     cl.user_session.set("thinking_effort", None)
     cl.user_session.set("system_prompt", DEFAULT_SYSTEM_PROMPT)
     cl.user_session.set("histories", {})  # per-provider histories
+    cl.user_session.set("provider_called", False)
 
 
 def _restore_session_from_metadata(metadata: Optional[Dict[str, object]]) -> bool:
@@ -1192,30 +1193,24 @@ async def on_message(message: cl.Message):
     history.append({"role": "user", "content": user_content})
     thread_id = await _ensure_thread_id()
     thread = await DATA_LAYER.get_thread(thread_id)
+
+    # Generate a title now but defer persisting it until *after* a successful
+    # provider response — that ensures the thread has a real user step when
+    # Chainlit's sidebar queries the data layer so it appears immediately.
+    title_to_set = None
     if not _thread_title_set(thread):
-        title = await _generate_title_from_prompt(text)
-        await DATA_LAYER.update_thread(
-            thread_id=thread_id,
-            name=title,
-            user_id=_current_user_id() or _current_user_identifier(),
-            metadata={"title_set": True},
-        )
+        title_to_set = await _generate_title_from_prompt(text)
     else:
+        # Update the thread's user id now so the session is associated, but
+        # avoid changing the name (title) here.
         await DATA_LAYER.update_thread(
             thread_id=thread_id,
             user_id=_current_user_id() or _current_user_identifier(),
         )
 
-    # Save user step to data layer
-    await DATA_LAYER.create_step(
-        {
-            "id": str(uuid.uuid4()),
-            "type": "user",
-            "threadId": thread_id,
-            "createdAt": datetime.utcnow().isoformat() + "Z",
-            "output": text,
-        }
-    )
+    # NOTE: user steps and the final thread title are persisted only after a
+    # successful provider response. This prevents the sidebar from showing an
+    # empty/new thread before the first real user turn exists.
 
     status = await cl.Message(content=f"Calling {provider_name} ({model})...", author="system").send()
     try:
@@ -1274,15 +1269,65 @@ async def on_message(message: cl.Message):
 
         history.append({"role": "assistant", "content": reply})
 
-        await DATA_LAYER.create_step(
-            {
-                "id": str(uuid.uuid4()),
-                "type": "assistant",
-                "threadId": thread_id,
-                "createdAt": datetime.utcnow().isoformat() + "Z",
-                "output": reply,
-            }
-        )
+        # Mark that the user has successfully received a provider response for this session
+        try:
+            cl.user_session.set("provider_called", True)
+        except Exception:
+            pass
+
+        # Persist the user + assistant steps only after a successful provider call
+        try:
+            await DATA_LAYER.create_step(
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "user",
+                    "threadId": thread_id,
+                    "createdAt": datetime.utcnow().isoformat() + "Z",
+                    "output": text,
+                }
+            )
+        except Exception:
+            # If persisting the user step fails, continue without blocking the chat
+            pass
+
+        try:
+            await DATA_LAYER.create_step(
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "assistant",
+                    "threadId": thread_id,
+                    "createdAt": datetime.utcnow().isoformat() + "Z",
+                    "output": reply,
+                }
+            )
+        except Exception:
+            pass
+
+        # If we generated a title earlier, persist it now (after steps exist)
+        # so the sidebar will include the new thread immediately.
+        if title_to_set:
+            try:
+                await DATA_LAYER.update_thread(
+                    thread_id=thread_id,
+                    name=title_to_set,
+                    user_id=_current_user_id() or _current_user_identifier(),
+                    metadata={"title_set": True},
+                )
+            except Exception:
+                pass
+
+            # Notify the client so the threads sidebar refreshes immediately.
+            # Emitting 'first_interaction' mirrors what Chainlit does on the
+            # first user message and causes the UI to re-fetch the thread list.
+            try:
+                ctx = getattr(cl, "context", None)
+                if ctx and getattr(ctx, "emitter", None):
+                    await ctx.emitter.emit(
+                        "first_interaction",
+                        {"interaction": title_to_set, "thread_id": thread_id},
+                    )
+            except Exception:
+                pass
 
         if status:
             status.content = reply
