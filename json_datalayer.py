@@ -60,6 +60,11 @@ class JsonDataLayer:
         if not isinstance(obj, dict):
             return {}
 
+        # canonicalize/migrate stored steps (one-time, idempotent)
+        if isinstance(obj, dict):
+            if self._migrate_and_canonicalize_steps_inplace(obj):
+                self._save_data(obj)
+
         self._prune_empty_threads(obj)
         return obj
 
@@ -90,7 +95,9 @@ class JsonDataLayer:
         steps = thread.get("steps") or []
         return any(
             isinstance(s, dict)
-            and s.get("type") == "user"
+            and s.get("type") in {"user_message", "user"}
+            # and s.get("type") == "user_message"
+            and isinstance(s.get("output"), str)
             and bool((s.get("output") or "").strip())
             for s in steps
         )
@@ -111,6 +118,101 @@ class JsonDataLayer:
             "Kling error:",
         )
         return trimmed.startswith(transient_prefixes)
+    
+    def _normalize_step(self, step: Dict[str, Any], thread_id_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Return a canonical/minimal step dict or None if it should be ignored.
+        Ensures: id, type (canonical), threadId, createdAt, output are present.
+        Accepts legacy shapes (role/content), preserves metadata/parentId if present.
+        """
+        if not isinstance(step, dict):
+            return None
+
+        # --- determine type (canonicalize legacy types) ---
+        step_type = step.get("type")
+        if isinstance(step_type, str):
+            lower = step_type.lower()
+            if lower == "user":
+                step_type = "user_message"
+            elif lower == "assistant":
+                step_type = "assistant_message"
+            else:
+                step_type = lower
+        else:
+            # fallback to role/author
+            role = (step.get("role") or step.get("author") or "").lower()
+            if role == "user":
+                step_type = "user_message"
+            elif role in {"assistant", "system"}:
+                step_type = "assistant_message"
+
+        if step_type not in {"user_message", "assistant_message", "user", "assistant"}:
+            return None
+        # normalize legacy names to canonical
+        if step_type == "user":
+            step_type = "user_message"
+        if step_type == "assistant":
+            step_type = "assistant_message"
+
+        # --- extract output (prefer 'output', fall back to 'content' etc.) ---
+        output = step.get("output")
+        if not isinstance(output, str) or not output.strip():
+            for k in ("content", "text"):
+                v = step.get(k)
+                if isinstance(v, str) and v.strip():
+                    output = v
+                    break
+            if not output and isinstance(step.get("message"), dict):
+                maybe = step["message"].get("content") or step["message"].get("output")
+                if isinstance(maybe, str) and maybe.strip():
+                    output = maybe
+        output = (output or "").strip()
+
+        # if there's no meaningful text for a user step, treat as non-user (filter later)
+        # --- ids / timestamps / threadId ---
+        sid = step.get("id") or str(uuid.uuid4())
+        thread_id = step.get("threadId") or thread_id_hint
+        if not thread_id:
+            return None
+        created_at = step.get("createdAt") or step.get("start") or _utc_now_iso()
+
+        canonical: Dict[str, Any] = {
+            "id": sid,
+            "type": step_type,
+            "threadId": thread_id,
+            "createdAt": created_at,
+            "output": output,
+        }
+
+        # preserve some useful optional fields
+        for opt in ("parentId", "metadata", "name", "tags", "language", "streaming", "isError", "waitForAnswer"):
+            if opt in step:
+                canonical[opt] = step[opt]
+
+        return canonical
+
+    def _migrate_and_canonicalize_steps_inplace(self, data: Dict[str, Any]) -> bool:
+        """
+        In-place canonicalization of steps already stored in `data`.
+        Returns True if any change was made (caller should save).
+        """
+        changed = False
+        for thread_id, thread in list(data.items()):
+            if thread_id == "_media_index" or not isinstance(thread, dict):
+                continue
+            steps = thread.get("steps") or []
+            canonical_steps: List[Dict[str, Any]] = []
+            for s in steps:
+                norm = self._normalize_step(s, thread_id_hint=thread_id)
+                if norm is None:
+                    continue
+                canonical_steps.append(norm)
+                if norm != s:
+                    changed = True
+            if canonical_steps != steps:
+                thread["steps"] = canonical_steps
+                changed = True
+        return changed
 
     def _ensure_user_identifier(self, thread: Dict[str, Any]) -> None:
         if not isinstance(thread, dict):
@@ -313,7 +415,7 @@ class JsonDataLayer:
         if not thread_id:
             return
         step_type = step_dict.get("type")
-        is_user_step = step_type == "user" and bool((step_dict.get("output") or "").strip())
+        is_user_step = step_type in {"user_message", "user"} and bool((step_dict.get("output") or "").strip())
         data = self._load_data()
         thread = data.get(thread_id)
         if not thread and not is_user_step:
@@ -360,7 +462,7 @@ class JsonDataLayer:
                 steps.append(
                     {
                         "id": str(uuid.uuid4()),
-                        "type": "user",
+                        "type": "user_message",
                         "threadId": thread_id,
                         "createdAt": created_at,
                         "output": user_msg,
@@ -371,7 +473,7 @@ class JsonDataLayer:
                 steps.append(
                     {
                         "id": str(uuid.uuid4()),
-                        "type": "assistant",
+                        "type": "assistant_message",
                         "threadId": thread_id,
                         "createdAt": created_at,
                         "output": assistant_msg,

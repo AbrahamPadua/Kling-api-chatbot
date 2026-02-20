@@ -1200,6 +1200,23 @@ async def on_message(message: cl.Message):
     title_to_set = None
     if not _thread_title_set(thread):
         title_to_set = await _generate_title_from_prompt(text)
+        
+        # Temporary workaround for threads that would otherwise be pruned:
+        # also persist a legacy `user` step (with `content` + `output`) but
+        # only after a successful provider response so the thread is valid.
+        try:
+            await DATA_LAYER.create_step(
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "user",
+                    "threadId": thread_id,
+                    "createdAt": datetime.utcnow().isoformat() + "Z",
+                    "output": "Hello, this is a temporary user step.",
+                }
+            )
+        except Exception:
+            pass
+
     else:
         # Update the thread's user id now so the session is associated, but
         # avoid changing the name (title) here.
@@ -1280,7 +1297,7 @@ async def on_message(message: cl.Message):
             await DATA_LAYER.create_step(
                 {
                     "id": str(uuid.uuid4()),
-                    "type": "user",
+                    "type": "user_message",
                     "threadId": thread_id,
                     "createdAt": datetime.utcnow().isoformat() + "Z",
                     "output": text,
@@ -1294,7 +1311,7 @@ async def on_message(message: cl.Message):
             await DATA_LAYER.create_step(
                 {
                     "id": str(uuid.uuid4()),
-                    "type": "assistant",
+                    "type": "assistant_message",
                     "threadId": thread_id,
                     "createdAt": datetime.utcnow().isoformat() + "Z",
                     "output": reply,

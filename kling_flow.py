@@ -338,7 +338,7 @@ async def run_kling_multi_image_flow(
         await data_layer.create_step(
             {
                 "id": str(uuid.uuid4()),
-                "type": "assistant",
+                "type": "assistant_message",
                 "threadId": thread_id,
                 "createdAt": datetime.utcnow().isoformat() + "Z",
                 "output": reply,
@@ -553,7 +553,7 @@ async def run_kling_image_to_video_flow(
         await data_layer.create_step(
             {
                 "id": str(uuid.uuid4()),
-                "type": "assistant",
+                "type": "assistant_message",
                 "threadId": thread_id,
                 "createdAt": datetime.utcnow().isoformat() + "Z",
                 "output": reply,
