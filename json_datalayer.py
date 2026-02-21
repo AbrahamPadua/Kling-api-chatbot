@@ -242,8 +242,9 @@ class JsonDataLayer:
     def _prune_empty_threads(self, data: Dict[str, Any]) -> None:
         to_delete = []
         for thread_id, thread in data.items():
+            if thread_id == "_media_index":
+                continue
             if not isinstance(thread, dict):
-                to_delete.append(thread_id)
                 continue
             self._ensure_user_identifier(thread)
             steps = thread.get("steps") or []
@@ -360,7 +361,9 @@ class JsonDataLayer:
                 self._migrate_thread_user_ids(target_user)
                 self._migrated_user_ids = True
         data = self._load_data()
-        threads = list(data.values())
+        threads = [
+            t for k, t in data.items() if isinstance(t, dict) and not str(k).startswith("_")
+        ]
         if isinstance(filters, ThreadFilter):
             user_id = getattr(filters, "userId", None)
             if user_id:
