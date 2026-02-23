@@ -189,52 +189,94 @@ async def run_kling_multi_image_flow(
     aspect_ratio = await ask_choice("Select aspect ratio:", ["16:9", "9:16", "1:1"], default="16:9")
     duration = await ask_choice("Select duration:", ["5", "10"], default="5")
 
-    uploaded_files = list(initial_files or [])
+    # figure out how many reference images the user wants to supply
+    num_str = await ask_text("How many reference images will you provide? (1-4)", "1", 600)
+    try:
+        num_images = int(num_str)
+    except Exception:
+        num_images = 1
+    num_images = max(1, min(4, num_images))
 
-    upload_choice = await ask_choice(
-        "Upload images now?",
-        ["Upload", "Skip"],
-        default="Upload",
-    )
-    if upload_choice == "Upload":
-        new_files = await cl.AskFileMessage(
-            content="Upload 1–4 images (.jpg/.jpeg/.png).",
-            accept=["image/png", "image/jpeg"],
-            max_files=4,
-            timeout=600,
-        ).send()
-        uploaded_files.extend(list(new_files or []))
-
-    text_input = ""
-    if not uploaded_files:
-        text_input = await ask_text(
-            "Paste 1–4 image URLs or Base64 strings (optional if uploading files).",
-            "",
-            600,
+    # if exactly two, ask if they should be treated as first/last frames
+    first_last = False
+    if num_images == 2:
+        choice = await ask_choice(
+            "Treat these two images as first and last frames?",
+            ["No", "Yes"],
+            default="No",
         )
+        first_last = choice == "Yes"
+
+    uploaded_files: List[object] = list(initial_files or [])
     image_items: List[str] = []
     image_items.extend(parse_image_inputs(initial_text))
-    image_items.extend(parse_image_inputs(text_input))
 
-    if not image_items and not uploaded_files:
-        await cl.Message(content="At least one image is required. Please run /kling again.", author="system").send()
-        return
+    if first_last:
+        # prompt immediately for two uploads (first and last frames)
+        for label in ("first", "last"):
+            new_files = await cl.AskFileMessage(
+                content=f"Upload {label} image (.jpg/.jpeg/.png).",
+                accept=["image/png", "image/jpeg"],
+                max_files=1,
+                timeout=600,
+            ).send()
+            uploaded_files.extend(list(new_files or []))
 
-    if len(uploaded_files) > 4:
-        uploaded_files = uploaded_files[:4]
-    if len(image_items) > 4:
-        image_items = image_items[:4]
+        if not uploaded_files:
+            await cl.Message(content="At least one image is required. Please run /kling again.", author="system").send()
+            return
 
-    remaining = 4 - len(uploaded_files)
-    if remaining < len(image_items):
-        image_items = image_items[:remaining]
+        # enforce two-image limit
+        if len(uploaded_files) > 2:
+            uploaded_files = uploaded_files[:2]
+        # no text inputs allowed for this mode
+        image_items = []
+        mark_first_end = True
+    else:
+        # traditional collection for 1–4 (or num_images) images
+        upload_choice = await ask_choice(
+            "Upload images now?",
+            ["Upload", "Skip"],
+            default="Upload",
+        )
+        if upload_choice == "Upload":
+            new_files = await cl.AskFileMessage(
+                content=f"Upload up to {num_images} images (.jpg/.jpeg/.png).",
+                accept=["image/png", "image/jpeg"],
+                max_files=num_images,
+                timeout=600,
+            ).send()
+            uploaded_files.extend(list(new_files or []))
 
-    add_first_end = await ask_choice(
-        "Mark first and last image as first_frame/end_frame?",
-        ["Yes", "No"],
-        default="Yes",
-    )
-    mark_first_end = add_first_end == "Yes"
+        text_input = ""
+        if not uploaded_files:
+            text_input = await ask_text(
+                f"Paste {num_images} image URLs or Base64 strings (optional if uploading files).",
+                "",
+                600,
+            )
+        image_items.extend(parse_image_inputs(text_input))
+
+        if not image_items and not uploaded_files:
+            await cl.Message(content="At least one image is required. Please run /kling again.", author="system").send()
+            return
+
+        if len(uploaded_files) > num_images:
+            uploaded_files = uploaded_files[:num_images]
+        if len(image_items) > num_images:
+            image_items = image_items[:num_images]
+
+        remaining = num_images - len(uploaded_files)
+        if remaining < len(image_items):
+            image_items = image_items[:remaining]
+
+        # ask if the user wants the first/last markers when not in first_last mode
+        add_first_end = await ask_choice(
+            "Mark first and last image as first_frame/end_frame?",
+            ["Yes", "No"],
+            default="Yes",
+        )
+        mark_first_end = add_first_end == "Yes"
 
     convert_urls = await ask_choice(
         "Convert image URLs to Base64 for compatibility?",
